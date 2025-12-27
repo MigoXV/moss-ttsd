@@ -36,12 +36,14 @@ class MossTTSDInferencer:
         dtype: Any | None = None,
         max_new_tokens: int = 4096,
         fallback_audio: str = "error",
+        attn_implementation: str | None = None,
     ) -> None:
         self.model_dir = Path(model_dir)
         self.device = device
         self.dtype = dtype
         self.max_new_tokens = max_new_tokens
         self.fallback_audio = fallback_audio
+        self.attn_implementation = attn_implementation
 
         self.codec_path = self._resolve_codec_path(codec_path)
         self.voice_registry = VoiceRegistry(voices_dir or os.getenv("VOICES_DIR"))
@@ -129,6 +131,8 @@ class MossTTSDInferencer:
         model_kwargs: dict[str, Any] = {"trust_remote_code": True}
         if self.dtype is not None:
             model_kwargs["torch_dtype"] = self.dtype
+        if self.attn_implementation is not None:
+            model_kwargs["attn_implementation"] = self.attn_implementation
 
         if self.device == "auto":
             model_kwargs["device_map"] = "auto"

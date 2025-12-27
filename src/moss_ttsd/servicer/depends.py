@@ -23,6 +23,7 @@ def initialize_inferencer(
     dtype=None,
     max_new_tokens: int = 4096,
     fallback_audio: str = "error",
+    attn_implementation: Optional[str] = None,
 ) -> Optional[MossTTSDInferencer]:
     global _inferencer_instance
     logger.info("Loading MOSS-TTSD inferencer")
@@ -33,6 +34,7 @@ def initialize_inferencer(
     logger.info("  - dtype          : %s", dtype)
     logger.info("  - max_new_tokens : %s", max_new_tokens)
     logger.info("  - fallback_audio : %s", fallback_audio)
+    logger.info("  - attn_impl      : %s", attn_implementation)
 
     _inferencer_instance = MossTTSDInferencer(
         model_dir=model_dir,
@@ -42,6 +44,7 @@ def initialize_inferencer(
         dtype=dtype,
         max_new_tokens=max_new_tokens,
         fallback_audio=fallback_audio,
+        attn_implementation=attn_implementation,
     )
     logger.info("✓ Inferencer initialized")
     return _inferencer_instance

@@ -62,6 +62,11 @@ def serve(
         help="When inference is unavailable: error/dummy",
         envvar="FALLBACK_AUDIO",
     ),
+    attn_implementation: Optional[str] = typer.Option(
+        None,
+        help="Attention implementation: sdpa/flash_attention_2/eager",
+        envvar="ATTN_IMPLEMENTATION",
+    ),
 ):
     """Start the OpenAI-compatible TTS service."""
     logging.basicConfig(
@@ -85,6 +90,7 @@ def serve(
     logger.info("  dtype          : %s", dtype_obj)
     logger.info("  max_new_tokens : %s", max_new_tokens)
     logger.info("  fallback_audio : %s", fallback_audio)
+    logger.info("  attn_impl      : %s", attn_implementation)
     logger.info("=" * 60)
 
     import uvicorn  # type: ignore
@@ -100,6 +106,7 @@ def serve(
         dtype=dtype_obj,
         max_new_tokens=max_new_tokens,
         fallback_audio=fallback_audio,
+        attn_implementation=attn_implementation,
     )
     if fallback_audio == "error" and (inferencer is None or not inferencer.is_ready):
         logger.error("Inferencer initialization failed: %s", getattr(inferencer, "init_error", None))
