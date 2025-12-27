@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Callable, Optional
+from typing import Callable, Generator, Optional
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -20,6 +20,7 @@ class SpeechRequest(BaseModel):
     input: str = Field(..., min_length=1, description="Text to synthesize")
     voice: str = Field("default", description="Voice name (ignored by default)")
     response_format: str = Field("wav", description="Only 'wav' is supported currently")
+    stream: bool = Field(False, description="Enable streaming response")
 
 
 def _openai_error(status_code: int, message: str, *, param: str | None = None):
@@ -39,6 +40,26 @@ def _openai_error(status_code: int, message: str, *, param: str | None = None):
 def create_app(get_inferencer_func: Callable[[], Optional[MossTTSDInferencer]]) -> FastAPI:
     app = FastAPI(title="MOSS-TTSD OpenAI TTS API")
 
+    async def _stream_audio_generator(
+        inferencer: MossTTSDInferencer,
+        text: str,
+        model: str,
+        voice: str,
+        response_format: str,
+    ) -> Generator[bytes, None, None]:
+        """异步生成器：包装同步的流式 TTS 生成"""
+        try:
+            for chunk in inferencer.tts_stream(
+                text,
+                model=model,
+                voice=voice,
+                response_format=response_format,
+            ):
+                yield chunk
+        except Exception as exc:
+            logger.exception("Streaming TTS failed")
+            raise
+
     async def _audio_speech_impl(
         request: SpeechRequest,
         inferencer: Optional[MossTTSDInferencer],
@@ -50,6 +71,33 @@ def create_app(get_inferencer_func: Callable[[], Optional[MossTTSDInferencer]]) 
         if response_format != "wav":
             return _openai_error(400, f"Unsupported response_format: {response_format}", param="response_format")
 
+        # 流式响应
+        if request.stream:
+            async def async_stream():
+                try:
+                    gen = await asyncio.to_thread(
+                        lambda: list(inferencer.tts_stream(
+                            request.input,
+                            model=request.model,
+                            voice=request.voice,
+                            response_format=response_format,
+                        ))
+                    )
+                    for chunk in gen:
+                        yield chunk
+                except ValueError as exc:
+                    logger.error("TTS stream error: %s", exc)
+                    raise
+                except Exception as exc:
+                    logger.exception("TTS stream failed")
+                    raise
+
+            return StreamingResponse(
+                content=async_stream(),
+                media_type="audio/wav",
+            )
+
+        # 非流式响应（原有逻辑）
         try:
             result = await asyncio.to_thread(
                 inferencer.tts,

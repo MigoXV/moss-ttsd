@@ -67,6 +67,16 @@ def serve(
         help="Attention implementation: sdpa/flash_attention_2/eager",
         envvar="ATTN_IMPLEMENTATION",
     ),
+    trim_silence: bool = typer.Option(
+        True,
+        help="Enable silence trimming at the beginning of generated audio",
+        envvar="TRIM_SILENCE",
+    ),
+    trim_silence_top_db: float = typer.Option(
+        30.0,
+        help="Threshold in dB below peak to consider as silence",
+        envvar="TRIM_SILENCE_TOP_DB",
+    ),
 ):
     """Start the OpenAI-compatible TTS service."""
     logging.basicConfig(
@@ -91,6 +101,8 @@ def serve(
     logger.info("  max_new_tokens : %s", max_new_tokens)
     logger.info("  fallback_audio : %s", fallback_audio)
     logger.info("  attn_impl      : %s", attn_implementation)
+    logger.info("  trim_silence   : %s", trim_silence)
+    logger.info("  trim_top_db    : %s", trim_silence_top_db)
     logger.info("=" * 60)
 
     import uvicorn  # type: ignore
@@ -107,6 +119,8 @@ def serve(
         max_new_tokens=max_new_tokens,
         fallback_audio=fallback_audio,
         attn_implementation=attn_implementation,
+        trim_silence=trim_silence,
+        trim_silence_top_db=trim_silence_top_db,
     )
     if fallback_audio == "error" and (inferencer is None or not inferencer.is_ready):
         logger.error("Inferencer initialization failed: %s", getattr(inferencer, "init_error", None))

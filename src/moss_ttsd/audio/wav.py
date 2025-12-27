@@ -1,11 +1,89 @@
 from __future__ import annotations
 
 import io
+import logging
 import math
 import wave
 from typing import Optional
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
+
+
+def trim_silence(
+    audio: np.ndarray,
+    sample_rate: int,
+    *,
+    top_db: float = 30.0,
+    frame_length: int = 2048,
+    hop_length: int = 512,
+    trim_start: bool = True,
+    trim_end: bool = False,
+) -> np.ndarray:
+    """
+    使用能量 VAD 去除音频前后的静音部分。
+    
+    Args:
+        audio: 音频数据，shape 为 (time,) 或 (channels, time)
+        sample_rate: 采样率
+        top_db: 低于峰值能量多少 dB 被认为是静音，默认 30dB
+        frame_length: 帧长度（样本数）
+        hop_length: 帧移（样本数）
+        trim_start: 是否去除开头静音
+        trim_end: 是否去除结尾静音
+        
+    Returns:
+        去除静音后的音频数据
+    """
+    if audio.size == 0:
+        return audio
+    
+    # 确保是 1D 数组用于处理
+    if audio.ndim == 2:
+        # (channels, time) -> 取第一个通道计算能量
+        if audio.shape[0] <= audio.shape[1]:
+            audio_1d = audio[0]
+            is_channels_first = True
+        else:
+            audio_1d = audio[:, 0]
+            is_channels_first = False
+    else:
+        audio_1d = audio
+        is_channels_first = None
+    
+    try:
+        import librosa
+        
+        # 使用 librosa 的 trim 功能
+        _, (start_idx, end_idx) = librosa.effects.trim(
+            audio_1d.astype(np.float32),
+            top_db=top_db,
+            frame_length=frame_length,
+            hop_length=hop_length,
+        )
+        
+        # 根据参数决定是否裁剪
+        if not trim_start:
+            start_idx = 0
+        if not trim_end:
+            end_idx = len(audio_1d)
+            
+        # 应用裁剪到原始音频
+        if audio.ndim == 2:
+            if is_channels_first:
+                return audio[:, start_idx:end_idx]
+            else:
+                return audio[start_idx:end_idx, :]
+        else:
+            return audio[start_idx:end_idx]
+            
+    except ImportError:
+        logger.warning("librosa not installed, skipping silence trimming")
+        return audio
+    except Exception as e:
+        logger.warning("Failed to trim silence: %s", e)
+        return audio
 
 
 def _to_time_channels(audio: np.ndarray) -> np.ndarray:

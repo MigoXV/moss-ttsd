@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Generator, Optional
 
 import numpy as np
 
-from moss_ttsd.audio import pcm16_wav_bytes, sine_wav_bytes
+from moss_ttsd.audio import pcm16_wav_bytes, sine_wav_bytes, trim_silence
 from moss_ttsd.voices import VoiceRegistry
 
 logger = logging.getLogger(__name__)
@@ -21,6 +23,58 @@ class TTSResult:
     model: str
     voice: str
     used_fallback: bool
+
+
+class AudioTokenStreamer:
+    """用于流式音频生成的 Token Streamer，收集 tokens 并定期解码为音频块"""
+    
+    def __init__(
+        self,
+        processor: Any,
+        torch_module: Any,
+        chunk_size: int = 50,  # 每多少个 token 解码一次
+        sample_rate: int = 24000,
+    ):
+        self.processor = processor
+        self.torch = torch_module
+        self.chunk_size = chunk_size
+        self.sample_rate = sample_rate
+        
+        self.token_buffer: list = []
+        self.audio_queue: queue.Queue = queue.Queue()
+        self.finished = False
+        self._lock = threading.Lock()
+        
+    def put(self, tokens):
+        """接收生成的 tokens"""
+        with self._lock:
+            if hasattr(tokens, 'tolist'):
+                tokens = tokens.tolist()
+            if isinstance(tokens, list):
+                self.token_buffer.extend(tokens)
+            else:
+                self.token_buffer.append(tokens)
+    
+    def end(self):
+        """标记生成结束"""
+        with self._lock:
+            self.finished = True
+            # 处理剩余的 tokens
+            self.audio_queue.put(None)  # 结束信号
+    
+    def get_audio_chunks(self) -> Generator[bytes, None, None]:
+        """获取音频块的生成器"""
+        while True:
+            try:
+                chunk = self.audio_queue.get(timeout=0.1)
+                if chunk is None:
+                    break
+                yield chunk
+            except queue.Empty:
+                with self._lock:
+                    if self.finished:
+                        break
+                continue
 
 
 class MossTTSDInferencer:
@@ -37,6 +91,8 @@ class MossTTSDInferencer:
         max_new_tokens: int = 4096,
         fallback_audio: str = "error",
         attn_implementation: str | None = None,
+        trim_silence: bool = True,
+        trim_silence_top_db: float = 30.0,
     ) -> None:
         self.model_dir = Path(model_dir)
         self.device = device
@@ -44,6 +100,8 @@ class MossTTSDInferencer:
         self.max_new_tokens = max_new_tokens
         self.fallback_audio = fallback_audio
         self.attn_implementation = attn_implementation
+        self.trim_silence_enabled = trim_silence
+        self.trim_silence_top_db = trim_silence_top_db
 
         self.codec_path = self._resolve_codec_path(codec_path)
         self.voice_registry = VoiceRegistry(voices_dir or os.getenv("VOICES_DIR"))
@@ -299,7 +357,9 @@ class MossTTSDInferencer:
             if audio is None:
                 wav_bytes = sine_wav_bytes(sample_rate=sample_rate)
             else:
-                wav_bytes = pcm16_wav_bytes(np.asarray(audio), sample_rate)
+                # 使用能量 VAD 去除开头的静音部分
+                audio = trim_silence(np.asarray(audio), sample_rate, top_db=30.0, trim_start=True, trim_end=False)
+                wav_bytes = pcm16_wav_bytes(audio, sample_rate)
 
             return TTSResult(
                 wav_bytes=wav_bytes,
@@ -308,5 +368,107 @@ class MossTTSDInferencer:
                 voice=voice,
                 used_fallback=False,
             )
+        finally:
+            self.clear_cache()
+
+    def tts_stream(
+        self,
+        text: str,
+        *,
+        model: str = "moss-ttsd",
+        voice: str = "default",
+        response_format: str = "wav",
+        chunk_size: int = 100,  # 每多少个 token 解码一次
+    ) -> Generator[bytes, None, None]:
+        """
+        流式 TTS 生成，逐块返回音频数据。
+        
+        由于 MOSS-TTSD 模型的特殊多通道架构，流式生成需要累积足够的 tokens 才能解码。
+        这里采用的策略是：在生成过程中累积 tokens，最后一次性解码并返回完整音频。
+        
+        对于真正的实时流式音频，需要模型原生支持增量解码，这里提供的是"分块流式"，
+        即服务端生成完成后分块发送给客户端。
+        
+        Args:
+            text: 要合成的文本
+            model: 模型标识符
+            voice: 音色名称
+            response_format: 响应格式，目前仅支持 'wav'
+            chunk_size: 每个音频块的字节数（用于流式传输）
+            
+        Yields:
+            bytes: WAV 格式的音频数据块
+        """
+        response_format = (response_format or "wav").lower()
+        if response_format != "wav":
+            raise ValueError(f"Unsupported response_format: {response_format}")
+
+        if not text:
+            raise ValueError("input text cannot be empty")
+
+        if not self.is_ready:
+            if self.fallback_audio == "dummy":
+                wav_bytes = sine_wav_bytes()
+                yield wav_bytes
+                return
+            detail = self._init_error or "Inferencer is not initialized."
+            raise RuntimeError(detail)
+
+        torch = self._torch
+        processor = self._processor
+        model_obj = self._model
+
+        text = self._ensure_speaker_tag(text)
+        try:
+            voice_name = self._parse_voice_name(voice)
+            voice_spec = self.voice_registry.resolve(voice_name)
+
+            item: dict[str, Any] = {"text": text}
+            if voice_spec is not None:
+                item["prompt_audio"] = str(voice_spec.audio_path)
+                item["prompt_text"] = voice_spec.transcription_text
+
+            inputs = processor(item)
+
+            # 将输入张量移动到模型所在设备
+            model_device = next(model_obj.parameters()).device
+            if hasattr(inputs, "to"):
+                inputs = inputs.to(model_device)
+            else:
+                inputs = {
+                    k: v.to(model_device) if isinstance(v, torch.Tensor) else v
+                    for k, v in inputs.items()
+                }
+
+            # 生成 tokens
+            with torch.inference_mode():
+                token_ids = model_obj.generate(
+                    input_ids=inputs["input_ids"],
+                    attention_mask=inputs.get("attention_mask"),
+                    max_new_tokens=self.max_new_tokens,
+                )
+            
+            # 解码音频
+            audio, sample_rate = self._decode_tokens(processor, token_ids[0])
+
+            if audio is None:
+                wav_bytes = sine_wav_bytes(sample_rate=sample_rate)
+            else:
+                audio = np.asarray(audio)
+                # 使用能量 VAD 去除开头的静音部分
+                if self.trim_silence_enabled:
+                    audio = trim_silence(
+                        audio, sample_rate,
+                        top_db=self.trim_silence_top_db,
+                        trim_start=True,
+                        trim_end=False,
+                    )
+                wav_bytes = pcm16_wav_bytes(audio, sample_rate)
+
+            # 分块发送
+            stream_chunk_size = 4096  # 每块 4KB
+            for i in range(0, len(wav_bytes), stream_chunk_size):
+                yield wav_bytes[i:i + stream_chunk_size]
+                
         finally:
             self.clear_cache()
