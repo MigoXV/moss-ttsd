@@ -22,7 +22,6 @@ def initialize_inferencer(
     device: str = "cpu",
     dtype=None,
     max_new_tokens: int = 4096,
-    fallback_audio: str = "error",
     attn_implementation: Optional[str] = None,
     trim_silence: bool = True,
     trim_silence_top_db: float = 30.0,
@@ -35,7 +34,6 @@ def initialize_inferencer(
     logger.info("  - device         : %s", device)
     logger.info("  - dtype          : %s", dtype)
     logger.info("  - max_new_tokens : %s", max_new_tokens)
-    logger.info("  - fallback_audio : %s", fallback_audio)
     logger.info("  - attn_impl      : %s", attn_implementation)
     logger.info("  - trim_silence   : %s", trim_silence)
     logger.info("  - trim_top_db    : %s", trim_silence_top_db)
@@ -47,7 +45,6 @@ def initialize_inferencer(
         device=device,
         dtype=dtype,
         max_new_tokens=max_new_tokens,
-        fallback_audio=fallback_audio,
         attn_implementation=attn_implementation,
         trim_silence=trim_silence,
         trim_silence_top_db=trim_silence_top_db,
