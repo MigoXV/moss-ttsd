@@ -57,11 +57,6 @@ def serve(
         help="Max new tokens for generation",
         envvar="MAX_NEW_TOKENS",
     ),
-    fallback_audio: str = typer.Option(
-        "error",
-        help="When inference is unavailable: error/dummy",
-        envvar="FALLBACK_AUDIO",
-    ),
     attn_implementation: Optional[str] = typer.Option(
         None,
         help="Attention implementation: sdpa/flash_attention_2/eager",
@@ -76,6 +71,11 @@ def serve(
         30.0,
         help="Threshold in dB below peak to consider as silence",
         envvar="TRIM_SILENCE_TOP_DB",
+    ),
+    voices_cache_dir: Optional[str] = typer.Option(
+        "./model-bin/voices-cache",
+        help="Directory containing pre-cached voice .npz files",
+        envvar="VOICES_CACHE_DIR",
     ),
 ):
     """Start the OpenAI-compatible TTS service."""
@@ -94,12 +94,12 @@ def serve(
     logger.info("  model_dir      : %s", model_dir)
     logger.info("  codec_path     : %s", codec_path)
     logger.info("  voices_dir     : %s", voices_dir)
+    logger.info("  voices_cache   : %s", voices_cache_dir)
     logger.info("  host           : %s", host)
     logger.info("  port           : %s", port)
     logger.info("  device         : %s", device)
     logger.info("  dtype          : %s", dtype_obj)
     logger.info("  max_new_tokens : %s", max_new_tokens)
-    logger.info("  fallback_audio : %s", fallback_audio)
     logger.info("  attn_impl      : %s", attn_implementation)
     logger.info("  trim_silence   : %s", trim_silence)
     logger.info("  trim_top_db    : %s", trim_silence_top_db)
@@ -117,15 +117,14 @@ def serve(
         device=device,
         dtype=dtype_obj,
         max_new_tokens=max_new_tokens,
-        fallback_audio=fallback_audio,
         attn_implementation=attn_implementation,
         trim_silence=trim_silence,
         trim_silence_top_db=trim_silence_top_db,
     )
-    if fallback_audio == "error" and (inferencer is None or not inferencer.is_ready):
+    if inferencer is None:
         logger.error("Inferencer initialization failed: %s", getattr(inferencer, "init_error", None))
         raise typer.Exit(code=1)
-    fastapi_app = create_app(get_inferencer)
+    fastapi_app = create_app(get_inferencer, voices_cache_dir=voices_cache_dir)
 
     uvicorn.run(
         fastapi_app,
